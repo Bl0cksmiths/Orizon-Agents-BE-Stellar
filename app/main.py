@@ -81,11 +81,14 @@ from .services import (
     task_persistence,
     task_warmup,
 )
+from .services.activity import ActivityMiddleware
 from .services.binding_registry import refresh_bound_ids, start_refresh_retry, stop_refresh_retry
 from .services.binding_store import close_binding_store
+from .services.dispute_store import STORE_NAME as DISPUTE_STORE_NAME
 from .services.dispute_store import PostgresDisputeStore, close_dispute_store, get_dispute_store
 from .services.external_binding import ChallengeBudgetExhausted
 from .services.snapshot_store import close_snapshot_store
+from .services.store_errors import StoreUnavailable, store_health
 from .stellar import client as sc
 
 
@@ -420,7 +423,11 @@ app = FastAPI(
     ],
 )
 
-# Added first → runs innermost: oversized bodies are rejected before the
+# Innermost of all: only a request every layer let through counts as the API
+# being in use, which keeps the database-reading keep-warm running (activity.py).
+app.add_middleware(ActivityMiddleware)
+
+# Added next → innermost but one: oversized bodies are rejected before the
 # router, while the 413 still passes through the header/CORS/request-id
 # layers wrapping it.
 app.add_middleware(BodyLimitMiddleware)
@@ -618,6 +625,38 @@ async def challenge_budget_handler(request: Request, exc: ChallengeBudgetExhaust
     )
 
 
+# How long a client is told to wait before asking a store again. Long enough
+# that a page polling every few seconds backs off instead of hammering a
+# database that is already refusing it; short enough that a cold or briefly
+# throttled one is retried soon after it is back.
+STORE_RETRY_AFTER_SECONDS = 30
+
+
+@app.exception_handler(StoreUnavailable)
+async def store_unavailable_handler(request: Request, exc: StoreUnavailable) -> JSONResponse:
+    """A store that cannot reach its database, answered 503 rather than 500.
+
+    The request was fine and the service is not broken: the records it needs
+    are out of reach for now — a Postgres over its quota, cold or restarting —
+    and asking again later is the right move, which is what 503 and
+    Retry-After say. A 500 `internal_error` said the opposite, and taught every
+    client that a dispute or a binding read had found a bug.
+
+    The message names the KIND of record (`StoreUnavailable.store`) and never
+    the database: no host, no DSN, no driver text. The outage itself is logged
+    once, when it begins, by `store_errors` — not here, once per request.
+    """
+    return JSONResponse(
+        status_code=503,
+        content=_error_envelope(
+            "store_unavailable",
+            "store_unavailable",
+            f"the {exc.store} store is temporarily unavailable; try again shortly",
+        ),
+        headers={"Retry-After": str(STORE_RETRY_AFTER_SECONDS)},
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Same 422 body FastAPI emits by default, plus the "error" object."""
@@ -758,7 +797,11 @@ class RefundReconcileReadiness(BaseModel):
     nonzero `history_gap`, `no_hash`, `not_this_refund`, `amount_mismatch`,
     `not_crediting`, `missing` or `lost_race` is a claim waiting on a human,
     and the log names it. `last_skipped` says why a pass read nothing, such
-    as a deployment that cannot pay credits. Informational, like the rest.
+    as a deployment that cannot pay credits. `next_run_at` and
+    `next_run_reason` say when the loop runs again and why — `boot`, `claim`
+    (a refund claim taken is old enough to judge), `retry` (the last pass left
+    one it can still finish) or `fallback` (REFUND_RECONCILE_INTERVAL_SECONDS)
+    — both null while it is not running. Informational, like the rest.
     """
 
     enabled: bool
@@ -766,6 +809,8 @@ class RefundReconcileReadiness(BaseModel):
     last_run_at: float | None  # epoch seconds, this process's clock
     last_skipped: str | None
     last_outcomes: dict[str, int]
+    next_run_at: float | None = None  # epoch seconds, this process's clock
+    next_run_reason: refund_reconcile.NextReason | None = None
 
 
 class DisputesReadiness(BaseModel):
@@ -777,15 +822,25 @@ class DisputesReadiness(BaseModel):
     whoever cannot read that log, or reads it after a restart took the line.
 
     The KIND of store only, never the DSN or anything derived from it: the DSN
-    carries the database password. It reports the selection, not a live
-    connection — the probe dials nothing, and a Postgres that is unreachable
-    is answered by the first request that needs it, loudly, never by a quiet
-    fall back to memory.
+    carries the database password. The probe dials nothing — a probe that
+    connects would keep a serverless Postgres from ever suspending — so
+    `available` is what this process last LEARNED from the calls it made
+    anyway (requests and the refund reconcile sweep; `store_errors.store_health`):
+    false from the first call that could not connect, which the API answered
+    503 `store_unavailable`, until one gets through. `unavailable_since` (epoch
+    seconds) and `cause` (the failure's class, e.g. InsufficientResourcesError
+    for a Neon project over its quota) say when and why, and are null while it
+    is reachable. `available` is null on Postgres until a call has been made
+    since boot. An unreachable Postgres is never a quiet fall back to memory.
 
-    Informational, like `cold_start`: an in-memory store serves every request.
+    Informational, like `cold_start`: an in-memory store serves every request,
+    and an unreachable one fails only the routes that need it.
     """
 
     store: Literal["postgres", "memory"]
+    available: bool | None = None
+    unavailable_since: float | None = None
+    cause: str | None = None
     reconcile: RefundReconcileReadiness
 
 
@@ -838,6 +893,21 @@ class TreasuryReadiness(BaseModel):
     agents: dict[str, registry_sync.PlatformVerdict]
 
 
+def _disputes_readiness() -> DisputesReadiness:
+    """The dispute store's kind and its last known reachability, from memory."""
+    reconcile = RefundReconcileReadiness(**refund_reconcile.status())
+    if not isinstance(get_dispute_store(), PostgresDisputeStore):
+        return DisputesReadiness(store="memory", available=True, reconcile=reconcile)
+    health = store_health(DISPUTE_STORE_NAME)
+    return DisputesReadiness(
+        store="postgres",
+        available=health.available,
+        unavailable_since=health.since,
+        cause=health.cause,
+        reconcile=reconcile,
+    )
+
+
 def _treasury_readiness() -> TreasuryReadiness:
     try:
         address = platform_treasury.treasury_address()
@@ -884,6 +954,7 @@ class ReadinessResponse(BaseModel):
     registry: RegistryReadiness  # informational, never gates readiness
     treasury: TreasuryReadiness  # informational, never gates readiness
     origin_lock: OriginLockReadiness  # informational, never gates readiness
+    keep_warm: snapshots.KeepWarmReadiness  # informational, never gates readiness
     # Informational. Anyone: provider and planning active|paused (+ when a
     # pause lifts). With the operator X-API-Key: keys present, models, and
     # today's spend against the cap — numbers an abuser must not see.
@@ -956,10 +1027,7 @@ async def readiness(
             margin_bps=margin.margin_bps,
         ),
         ratings=RatingsReadiness(writer=writer.status, signer=writer.signer, scorer=writer.scorer),
-        disputes=DisputesReadiness(
-            store="postgres" if isinstance(get_dispute_store(), PostgresDisputeStore) else "memory",
-            reconcile=RefundReconcileReadiness(**refund_reconcile.status()),
-        ),
+        disputes=_disputes_readiness(),
         escrow=_escrow_readiness(),
         registry=RegistryReadiness(
             synced=sync.synced,
@@ -970,6 +1038,8 @@ async def readiness(
         treasury=_treasury_readiness(),
         # From memory: the mode and this process's refusal counts (ADR 0017).
         origin_lock=origin_lock_readiness(),
+        # From memory: whether the database-reading rebuilds are paused (idle).
+        keep_warm=snapshots.keep_warm_readiness(),
         # A wrong or absent key is simply the public view: a probe never 401s.
         orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )

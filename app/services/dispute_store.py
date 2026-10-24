@@ -48,6 +48,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from ..config import settings
 from .pg_schema import create_schema
+from .store_errors import outage_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,12 @@ logger = logging.getLogger(__name__)
 # for the duration is what stops a retry paying twice: the claim is the lock,
 # and it outlives the process that took it.
 DisputeStatus = Literal["open", "upheld", "crediting", "credited", "rejected"]
+
+# How this store is named when its database cannot be reached: in the 503's
+# message, in the outage log line and as its key in `store_errors.store_health`.
+# Generic on purpose — it says which records are out of reach, never where they
+# live.
+STORE_NAME = "dispute record"
 
 # Retention for the in-memory fallback ONLY — the store that runs when
 # DATABASE_URL is unset (local dev and the hermetic test suite). Postgres keeps
@@ -1668,6 +1675,7 @@ class PostgresDisputeStore:
             command_timeout=_POOL_COMMAND_TIMEOUT,
         )
 
+    @outage_boundary(STORE_NAME)
     async def record_settlement(self, record: SettlementRecord) -> None:
         pool = await self._ready_pool()
         # Every value written is the record's own. In particular `settled_at`
@@ -1690,16 +1698,19 @@ class PostgresDisputeStore:
             timeout=_POOL_COMMAND_TIMEOUT,
         )
 
+    @outage_boundary(STORE_NAME)
     async def get_settlement(self, job_id_hex: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_JOB_SQL, job_id_hex, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
+    @outage_boundary(STORE_NAME)
     async def get_settlement_by_task(self, task_id: str) -> SettlementRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_SETTLEMENT_BY_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_settlement(row)
 
+    @outage_boundary(STORE_NAME)
     async def count_settled_by_day(self) -> dict[int, int]:
         pool = await self._ready_pool()
         rows = await pool.fetch(_COUNT_SETTLED_BY_DAY_SQL, timeout=_POOL_COMMAND_TIMEOUT)
@@ -1729,16 +1740,19 @@ class PostgresDisputeStore:
             authorized_stroops=None if row["authorized_stroops"] is None else int(row["authorized_stroops"]),
         )
 
+    @outage_boundary(STORE_NAME)
     async def get_dispute(self, dispute_id: str) -> DisputeRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_DISPUTE_SQL, dispute_id, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
+    @outage_boundary(STORE_NAME)
     async def find_dispute(self, job_id_hex: str, step_index: int) -> DisputeRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_DISPUTE_BY_STEP_SQL, job_id_hex, step_index, timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
+    @outage_boundary(STORE_NAME)
     async def list_disputes_for_task(self, task_id: str) -> tuple[DisputeRecord, ...]:
         pool = await self._ready_pool()
         rows = await pool.fetch(_SELECT_DISPUTES_FOR_TASK_SQL, task_id, timeout=_POOL_COMMAND_TIMEOUT)
@@ -1778,6 +1792,7 @@ class PostgresDisputeStore:
             inflight_usdc=None if row["inflight_usdc"] is None else float(row["inflight_usdc"]),
         )
 
+    @outage_boundary(STORE_NAME)
     async def open_dispute(self, record: DisputeRecord) -> DisputeRecord:
         """Insert the dispute, or raise DuplicateDisputeError with the one that
         beat it to this step.
@@ -1828,6 +1843,7 @@ class PostgresDisputeStore:
             )
         raise DuplicateDisputeError(existing)
 
+    @outage_boundary(STORE_NAME)
     async def append_status(
         self,
         dispute_id: str,
@@ -1917,6 +1933,7 @@ class PostgresDisputeStore:
         # precondition refused the write.
         return None if row is None else self._to_dispute(row)
 
+    @outage_boundary(STORE_NAME)
     async def claim_refund(self, dispute_id: str) -> DisputeRecord | None:
         """Take the exclusive right to pay this dispute, or return None.
 
@@ -1934,6 +1951,7 @@ class PostgresDisputeStore:
         row = await pool.fetchrow(_CLAIM_REFUND_SQL, dispute_id, time.time(), timeout=_POOL_COMMAND_TIMEOUT)
         return None if row is None else self._to_dispute(row)
 
+    @outage_boundary(STORE_NAME)
     async def release_refund_claim(
         self, dispute_id: str, *, expected_refund_tx: str | None = None
     ) -> DisputeRecord | None:
@@ -1967,6 +1985,7 @@ class PostgresDisputeStore:
         )
         return None if row is None else self._to_dispute(row)
 
+    @outage_boundary(STORE_NAME)
     async def list_refund_claims(self) -> tuple[RefundClaim, ...]:
         """Every payout still in flight, oldest first.
 

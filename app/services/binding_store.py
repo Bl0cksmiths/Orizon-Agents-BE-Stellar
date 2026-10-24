@@ -41,6 +41,7 @@ from typing import Any, Protocol
 
 from ..config import settings
 from .pg_schema import create_schema
+from .store_errors import outage_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,18 @@ _MAX_BINDINGS = 500
 # Postgres counts connections much more tightly than queries.
 _POOL_MIN_SIZE = 0
 _POOL_MAX_SIZE = 5
+
+# Bounds on the connect and on every statement, for dispute_store's reasons:
+# asyncpg's own are 60 seconds to connect and no limit at all on a command, so
+# an unreachable database used to hold a bind or a binding read for a minute
+# before it failed. Bounded, the failure is prompt and is answered 503
+# store_unavailable rather than by a request that looks hung.
+_POOL_CONNECT_TIMEOUT = 10.0
+_POOL_COMMAND_TIMEOUT = 10.0
+
+# How this store is named when its database cannot be reached — dispute_store's
+# STORE_NAME, for its reasons.
+STORE_NAME = "agent binding"
 
 # Created on first use with CREATE TABLE IF NOT EXISTS. There is no migration
 # tooling in this repo and one table does not justify introducing any: the DDL
@@ -504,8 +517,15 @@ class PostgresBindingStore:
 
     async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
-        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+        return await asyncpg.create_pool(
+            dsn=self._dsn,
+            min_size=_POOL_MIN_SIZE,
+            max_size=_POOL_MAX_SIZE,
+            timeout=_POOL_CONNECT_TIMEOUT,
+            command_timeout=_POOL_COMMAND_TIMEOUT,
+        )
 
+    @outage_boundary(STORE_NAME)
     async def get(self, agent_id: str) -> BindingRecord | None:
         pool = await self._ready_pool()
         row = await pool.fetchrow(_SELECT_LATEST_SQL, agent_id)
@@ -517,6 +537,7 @@ class PostgresBindingStore:
             return None
         return self._to_record(agent_id, row)
 
+    @outage_boundary(STORE_NAME)
     async def put(self, agent_id: str, endpoint_url: str, owner: str) -> BindingRecord:
         pool = await self._ready_pool()
         # Timestamped here rather than with the database's now(): the record
@@ -528,6 +549,7 @@ class PostgresBindingStore:
             raise RuntimeError(f"binding insert returned no row for agent_id={agent_id}")
         return self._to_record(agent_id, row)
 
+    @outage_boundary(STORE_NAME)
     async def delete(self, agent_id: str, owner: str) -> UnbindRecord | None:
         pool = await self._ready_pool()
         # Our own clock, in epoch seconds, for `put`'s reason: the record handed
@@ -564,6 +586,7 @@ class PostgresBindingStore:
             previous_endpoint_url=row["previous_endpoint_url"],
         )
 
+    @outage_boundary(STORE_NAME)
     async def list_agent_ids(self) -> frozenset[str]:
         pool = await self._ready_pool()
         rows = await pool.fetch(_SELECT_AGENT_IDS_SQL)

@@ -72,6 +72,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemorySnapshotStore:
 async def _drain_saves() -> None:
     while snapshot_store._saves:
         await asyncio.gather(*list(snapshot_store._saves))
+        # A gather over tasks already done returns without yielding, and their
+        # done callbacks — which drop them from the set — are still queued.
+        await asyncio.sleep(0)
 
 
 async def _boot() -> None:
@@ -190,6 +193,199 @@ def test_without_an_age_limit_a_row_of_any_age_is_restored(store: InMemorySnapsh
     assert snap.age_seconds() >= 30 * 86_400 - 1
 
 
+class _CountingStore(InMemorySnapshotStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[bytes] = []
+        self.fail = False
+
+    async def save(self, name: str, scope: str, generated_at: float, body: bytes) -> None:
+        if self.fail:
+            raise ConnectionError("neon asleep")
+        self.writes.append(body)
+        await super().save(name, scope, generated_at, body)
+
+
+class _Same:
+    """Builds whose content is `n` until the test moves it."""
+
+    def __init__(self) -> None:
+        self.n = 1
+
+    async def __call__(self) -> _Doc:
+        return _Doc(n=self.n, generated_at=time.time())
+
+
+def _keyed_cell(builds: _Same, counting: _CountingStore, monkeypatch: pytest.MonkeyPatch) -> SnapshotCell[_Doc]:
+    monkeypatch.setattr(snapshot_store, "_store", counting)
+    monkeypatch.setattr(snapshots, "_boot_hooks", [])
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", 0.0)
+    cell = _cell(builds)  # type: ignore[arg-type]
+    snapshot_store.persist(cell, _decode, max_restore_age_seconds=None, content_key=lambda d: d.n)
+    return cell
+
+
+async def _build(cell: SnapshotCell[_Doc]) -> None:
+    task = cell.refresh(force=True)
+    assert task is not None
+    await task
+    await _drain_saves()
+
+
+def test_a_build_whose_content_did_not_change_is_not_written_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+
+    async def go() -> None:
+        await _build(cell)
+        await _build(cell)  # same content, a newer generated_at: not written
+        builds.n = 2
+        await _build(cell)
+        await _build(cell)
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [1, 2]
+
+
+def test_without_a_content_key_the_body_decides(store: InMemorySnapshotStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", 0.0)
+    counting = _CountingStore()
+    monkeypatch.setattr(snapshot_store, "_store", counting)
+    cell = _cell(_Builds())
+    snapshot_store.persist(cell, _decode, max_restore_age_seconds=None)
+
+    async def go() -> None:
+        await _build(cell)
+        await _build(cell)
+
+    asyncio.run(go())
+    assert len(counting.writes) == 2  # each build's body differs
+
+
+def test_a_write_that_failed_is_tried_again_by_the_next_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    counting.fail = True
+
+    async def go() -> None:
+        await _build(cell)
+        counting.fail = False
+        await _build(cell)  # unchanged, but the row never got it
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [1]
+
+
+def test_a_first_build_that_matches_the_restored_row_is_not_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    at = time.time() - 600
+    # Straight into the row, past the write counter: the previous process wrote it.
+    row = InMemorySnapshotStore.save(counting, "doc", snapshot_store.deployment_scope(), at, _encode(_Doc(1, at)))
+    asyncio.run(row)
+
+    async def go() -> None:
+        await _boot()
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [2]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 5_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _spaced_cell(
+    builds: _Same, counting: _CountingStore, monkeypatch: pytest.MonkeyPatch, interval: float
+) -> SnapshotCell[_Doc]:
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", interval)
+    return cell
+
+
+def _written(counting: _CountingStore) -> list[int]:
+    return [json.loads(b)["n"] for b in counting.writes]
+
+
+def test_a_change_inside_the_window_is_held_and_the_latest_is_written_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> list[int]:
+        await _build(cell)  # nothing written yet: at once
+        for n in (2, 3):
+            clock.now += 10.0
+            builds.n = n
+            await _build(cell)  # inside the window: held
+        held = _written(counting)
+        await snapshot_store.close_snapshot_store()
+        return held
+
+    assert asyncio.run(go()) == [1]
+    assert _written(counting) == [1, 3]
+
+
+def test_a_change_after_the_window_is_written_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> None:
+        await _build(cell)
+        clock.now += 900.0
+        builds.n = 2
+        await _build(cell)
+
+    asyncio.run(go())
+    assert _written(counting) == [1, 2]
+
+
+def test_the_held_change_is_written_when_the_window_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 0.05)
+
+    async def go() -> list[list[int]]:
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)
+        early = _written(counting)
+        await asyncio.sleep(0.1)
+        await _drain_saves()
+        return [early, _written(counting)]
+
+    assert asyncio.run(go()) == [[1], [1, 2]]
+
+
+def test_a_held_change_undone_before_the_window_closes_is_never_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(snapshot_store, "_clock", clock)
+    builds, counting = _Same(), _CountingStore()
+    cell = _spaced_cell(builds, counting, monkeypatch, 900.0)
+
+    async def go() -> None:
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)  # held
+        builds.n = 1
+        await _build(cell)  # what the row already holds: the held one is dropped
+        await snapshot_store.close_snapshot_store()
+
+    asyncio.run(go())
+    assert _written(counting) == [1]
+
+
 class _BrokenStore:
     async def load(self, name: str, scope: str) -> StoredSnapshot | None:
         raise ConnectionError("neon asleep")
@@ -262,6 +458,47 @@ def test_after_a_restart_the_last_adoption_report_is_served_at_once(monkeypatch:
     assert int(response.headers["x-snapshot-age"]) >= 119
     assert response.json() == json.loads(report.model_dump_json())
     assert adoption_svc.report_cell.building() is False
+
+
+def _report(**changes: Any) -> adoption_svc.AdoptionReport:
+    report = adoption_svc.AdoptionReport(
+        network="testnet",
+        generated_at=int(time.time()),
+        window_days=7.0,
+        targets=adoption_svc.TARGETS,
+        totals=adoption_svc.AdoptionCounts(external_agents=2, unique_operator_wallets=2, settled_external_workflows=3),
+        met=adoption_svc.AdoptionMet(
+            external_agents=True, unique_operator_wallets=True, settled_external_workflows=True
+        ),
+        operators=[],
+        excluded=[],
+        degraded=False,
+        unreadable_agents=[],
+    )
+    return report.model_copy(update=changes)
+
+
+def test_an_adoption_report_that_only_moved_its_stamp_or_scan_reach_is_not_a_change() -> None:
+    key = adoption_svc.report_content_key
+    coverage = adoption_svc.AdoptionCoverage(
+        agents_listed=4,
+        agents_accounted=4,
+        settlement_ledgers_scanned=100,
+        settlement_ledgers_in_window=120_000,
+        external_charges=3,
+        external_charges_unattributed=0,
+    )
+    moved = _report(
+        generated_at=int(time.time()) + 300,
+        window_days=6.9,
+        coverage=coverage.model_copy(update={"settlement_ledgers_scanned": 160}),
+    )
+    assert key(_report(coverage=coverage)) == key(moved)
+    counted = _report(
+        totals=adoption_svc.AdoptionCounts(external_agents=2, unique_operator_wallets=2, settled_external_workflows=4)
+    )
+    assert key(_report()) != key(counted)
+    assert key(_report()) != key(_report(degraded=True))
 
 
 def test_an_adoption_report_of_any_age_is_served_marked_with_it(monkeypatch: pytest.MonkeyPatch) -> None:

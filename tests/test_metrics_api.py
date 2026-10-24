@@ -850,6 +850,13 @@ def test_the_overview_is_kept_warm_and_rebuilt_on_a_registry_pass() -> None:
     assert schedule.fingerprint() == registry_sync.status().last_full_sync_at
 
 
+def test_the_overview_schedule_pauses_while_the_api_is_idle() -> None:
+    """Every build reads the settlement store, so a schedule that ran with
+    nobody polling kept the Neon compute from ever suspending."""
+    schedule = next(s for s in snapshots._schedules if s.cell is metrics_router.overview_cell)
+    assert schedule.pauses_when_idle is True
+
+
 def test_a_warm_overview_answers_well_inside_the_latency_budget(client, registry, monkeypatch) -> None:
     """The point of the snapshot: once one exists, a poll is a memory read,
     however slow the build behind it is."""

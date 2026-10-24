@@ -25,6 +25,12 @@ one younger than OVERVIEW_STALE_SERVE_SECONDS is served at once while one
 refresh runs behind it (`generated_at` dates it). Only a process with nothing
 recent to serve, or a snapshot taken from a registry mirror that has since
 completed, waits for the computation.
+
+The background rebuilds stop while the API is idle (KEEP_WARM_IDLE_PAUSE_SECONDS,
+app/services/activity.py): each one reads the settlement store, and a read
+every 30 s kept the Neon compute from ever suspending. So the first poll after
+a quiet spell longer than OVERVIEW_STALE_SERVE_SECONDS waits for one build —
+seconds, bounded by OVERVIEW_BUILD_TIMEOUT_SECONDS — and resumes the schedule.
 """
 
 from __future__ import annotations
@@ -66,11 +72,12 @@ OVERVIEW_CACHE_TTL_SECONDS = 15.0
 
 # How long past its expiry an overview may still be served while a refresh runs
 # behind it. A dashboard that is being polled never gets near this; it bounds
-# what the first poll after a quiet spell is shown before it waits instead.
+# what the first poll after a quiet spell is shown before it waits instead —
+# which, with the schedule paused while the API is idle, is what that poll does.
 OVERVIEW_STALE_SERVE_SECONDS = 300.0
 
-# The background rebuild's schedule: this often while the process is up, and
-# whenever the registry mirror completes a full pass.
+# The background rebuild's schedule: this often while the API is in use, and
+# whenever the registry mirror completes a full pass. Paused while it is idle.
 OVERVIEW_KEEP_WARM_SECONDS = 30.0
 
 # A build is bounded inside (the reputation batch deadline, the settlement
@@ -383,7 +390,8 @@ def _partial_superseded(overview: OverviewMetrics) -> bool:
 # OVERVIEW_CACHE_TTL_SECONDS; past that a poll is answered at once while one
 # rebuild runs behind it, up to OVERVIEW_STALE_SERVE_SECONDS past expiry, after
 # which a poll waits for the rebuild instead. The keep-warm schedule below means
-# a live process essentially never gets that far.
+# a process in use essentially never gets that far; one that has been idle
+# longer than that does, once, on its first poll.
 overview_cell: SnapshotCell[OverviewMetrics] = SnapshotCell(
     "overview",
     lambda: build_overview(),
@@ -396,15 +404,18 @@ overview_cell: SnapshotCell[OverviewMetrics] = SnapshotCell(
     must_rebuild=_partial_superseded,
 )
 
-# Rebuilt every OVERVIEW_KEEP_WARM_SECONDS whether or not anyone is polling, and
-# as soon as a registry full pass lands, so the first poll after a quiet spell
-# is answered from memory like every other one.
+# Rebuilt every OVERVIEW_KEEP_WARM_SECONDS and as soon as a registry full pass
+# lands, so a poll is answered from memory — while the API is in use. Every
+# build reads the settlement store, so the schedule pauses once no request has
+# arrived for KEEP_WARM_IDLE_PAUSE_SECONDS, and the database can suspend; the
+# next request is served as `overview_cell.get` serves any, and resumes it.
 snapshots.keep_warm(
     KeepWarm(
         cell=overview_cell,
         every_seconds=OVERVIEW_KEEP_WARM_SECONDS,
         fingerprint=lambda: registry_sync.status().last_full_sync_at,
         min_change_rebuild_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        pauses_when_idle=True,
     )
 )
 

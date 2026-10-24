@@ -258,6 +258,24 @@ class Settings(BaseSettings):
     # for why Neon rather than Render's own free Postgres, which expires after 30
     # days, i.e. exactly at award time.
     database_url: str = ""
+    # Seconds without a meaningful API request (app/services/activity.py: not
+    # a health or readiness probe, not the docs) after which the keep-warm
+    # schedules whose builds read Postgres stop rebuilding in the background.
+    # Neon suspends a compute only after a fixed five minutes with no query,
+    # so a rebuild every 30 s kept it running around the clock with nobody
+    # looking; once paused, the next request is served from the snapshot as
+    # it would be anyway and resumes the schedule. Bounded both ways
+    # (`_keep_warm_idle_pause_is_a_bound`): under a minute pauses between two
+    # polls of an open dashboard, over a day is never pausing at all.
+    keep_warm_idle_pause_seconds: float = 600.0
+    # The least time between two writes of one persisted snapshot
+    # (app/services/snapshot_store.py). A build whose content is unchanged is
+    # never written; a changed one inside this window is held and written when
+    # it closes, so the row is at most this far behind the process. It only
+    # serves the next boot, so a write per build was a database wake-up per
+    # build for nothing. From 0 (no spacing) to 86400
+    # (`_snapshot_persist_min_interval_is_a_bound`).
+    snapshot_persist_min_interval_seconds: float = 900.0
 
     # ── External dispatch (story 2.02 — envelope signing) ────
     # S… secret (or a 12/24-word mnemonic) used to sign the SEP-53 envelope on
@@ -404,13 +422,18 @@ class Settings(BaseSettings):
     # about the platform's wallet that belongs to a deployment paying credits.
     # It never signs or submits anything.
     refund_reconcile_enabled: bool = False
-    # Seconds between two passes. Bounded both ways (`_refund_reconcile_interval_is_usable`):
-    # at least 30, because a pass reads the chain once per held claim; at most
-    # 3600, because the RPC keeps only a window of transaction history (about
+    # The FALLBACK between two passes. The sweep is woken by the event itself —
+    # a claim taken, looked at once it is old enough — and re-checks a claim
+    # it could not settle yet on its own short retry, so this only bounds how
+    # long a claim it was never told about can wait, and it reads the database
+    # each time: an hour, so an idle deployment lets a serverless Postgres
+    # suspend. Bounded both ways (`_refund_reconcile_interval_is_usable`): at
+    # least 30, because a pass reads the chain once per held claim; at most a
+    # day, because the RPC keeps only a window of transaction history (about
     # seven days on SDF's testnet RPC, as little as a day on a default one) and
-    # a claim must be looked at well inside it — past it, NOT_FOUND no longer
-    # means anything and the claim falls back to a human.
-    refund_reconcile_interval_seconds: float = 120.0
+    # a claim must be looked at inside it — past it, NOT_FOUND no longer means
+    # anything and the claim falls back to a human.
+    refund_reconcile_interval_seconds: float = 3600.0
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
@@ -564,18 +587,18 @@ class Settings(BaseSettings):
         """Refuse a sweep interval that could not keep up with the RPC's history.
 
         A NaN or inf would make the loop's sleep raise or never end; under 30
-        seconds a pass is a chain read per claim on repeat; over an hour starts
-        eating into the RPC's history window, which is what makes NOT_FOUND
+        seconds a pass is a chain read per claim on repeat; over a day is past
+        the shortest RPC history window, which is what makes NOT_FOUND
         answerable at all. Checked whether or not the sweep is on, so turning
         it on later is not the moment a typo is found. Names the variable,
         never the value.
         """
         interval = self.refund_reconcile_interval_seconds
-        if not (math.isfinite(interval) and 30 <= interval <= 3600):
+        if not (math.isfinite(interval) and 30 <= interval <= 86_400):
             raise ValueError(
-                "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 3600 — the sweep "
-                "reads the chain once per held refund claim each pass, and has to look at every claim well inside "
-                "the RPC's transaction history window"
+                "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 86400 — the "
+                "sweep's fallback between passes; it reads the chain once per held refund claim each pass, and has "
+                "to look at every claim inside the RPC's transaction history window"
             )
         return self
 
@@ -594,6 +617,40 @@ class Settings(BaseSettings):
             raise ValueError(
                 "REGISTRY_BOOT_SYNC_TIMEOUT_SECONDS must be a finite number of seconds from 0 to 60 — the "
                 "reputation pre-warm waits this long, in the background, for the first registry sync pass"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _keep_warm_idle_pause_is_a_bound(self) -> "Settings":
+        """Refuse an idle pause that is not a bound.
+
+        NaN would compare as "not idle yet" forever and inf never pauses, which
+        is the always-on compute this setting exists to end; under 60 s the
+        background rebuilds would stop between two polls of an open dashboard.
+        Names the variable, never the value.
+        """
+        pause = self.keep_warm_idle_pause_seconds
+        if not (math.isfinite(pause) and 60 <= pause <= 86_400):
+            raise ValueError(
+                "KEEP_WARM_IDLE_PAUSE_SECONDS must be a finite number of seconds from 60 to 86400 — the background "
+                "snapshot rebuilds that read the database pause once no API request has arrived for this long"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _snapshot_persist_min_interval_is_a_bound(self) -> "Settings":
+        """Refuse a persistence spacing that is not a bound.
+
+        NaN would make every comparison against it false, and inf (or anything
+        past a day) would hold a changed snapshot back from the database for so
+        long that the next boot restores one that old. Names the variable,
+        never the value.
+        """
+        interval = self.snapshot_persist_min_interval_seconds
+        if not (math.isfinite(interval) and 0 <= interval <= 86_400):
+            raise ValueError(
+                "SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS must be a finite number of seconds from 0 to 86400 — a "
+                "changed read snapshot is written to the database at most this often"
             )
         return self
 

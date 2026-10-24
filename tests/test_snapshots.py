@@ -20,7 +20,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.services import snapshots
+from app.config import settings
+from app.services import activity, snapshots
 from app.services.snapshots import KeepWarm, SnapshotCell
 
 
@@ -485,6 +486,97 @@ def test_a_change_seen_while_the_gate_is_shut_is_not_lost() -> None:
     assert _run(go) == 2
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def idle_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """The activity tracker on a clock the test moves; the window is 600 s."""
+    clock = _Clock()
+    monkeypatch.setattr(settings, "keep_warm_idle_pause_seconds", 600.0)
+    monkeypatch.setattr(activity, "tracker", activity.ActivityTracker(clock))
+    return clock
+
+
+def test_an_idle_api_pauses_a_schedule_that_pauses_when_idle(idle_clock: _Clock) -> None:
+    builder = _Builder()
+    cell = _cell(builder)
+    fp = {"v": 1}
+    schedule = KeepWarm(cell=cell, every_seconds=0.0, fingerprint=lambda: fp["v"], pauses_when_idle=True)
+
+    async def go() -> list[int]:
+        calls = []
+        schedule.tick()  # boot counts as activity: the empty cell is built
+        await asyncio.sleep(0.01)
+        calls.append(builder.calls)
+        idle_clock.now += 600.0
+        assert schedule.paused()
+        fp["v"] = 2
+        for _ in range(3):  # due on age and on the fingerprint, and paused
+            schedule.tick()
+            await asyncio.sleep(0.01)
+        calls.append(builder.calls)
+        activity.note_request()  # a request resumes the schedule
+        assert not schedule.paused()
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        calls.append(builder.calls)
+        return calls
+
+    assert _run(go) == [1, 1, 2]
+
+
+def test_an_idle_api_does_not_build_an_empty_cell_from_the_schedule(idle_clock: _Clock) -> None:
+    builder = _Builder()
+    schedule = KeepWarm(cell=_cell(builder), every_seconds=60.0, pauses_when_idle=True)
+    idle_clock.now += 601.0
+
+    async def go() -> int:
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        return builder.calls
+
+    assert _run(go) == 0
+
+
+def test_a_schedule_that_does_not_pause_keeps_building_while_idle(idle_clock: _Clock) -> None:
+    builder = _Builder()
+    schedule = KeepWarm(cell=_cell(builder), every_seconds=0.0)
+    idle_clock.now += 3_600.0
+
+    async def go() -> int:
+        for _ in range(2):
+            schedule.tick()
+            await asyncio.sleep(0.01)
+        return builder.calls
+
+    assert not schedule.paused()
+    assert _run(go) == 2
+
+
+def test_a_read_while_paused_still_serves_the_stale_snapshot_and_rebuilds_behind_it(idle_clock: _Clock) -> None:
+    builder = _Builder()
+    cell = _cell(builder, fresh_seconds=0.0)
+    schedule = KeepWarm(cell=cell, every_seconds=0.0, pauses_when_idle=True)
+
+    async def go() -> list[object]:
+        first = await cell.get(wait_seconds=None)
+        idle_clock.now += 3_600.0
+        schedule.tick()
+        await asyncio.sleep(0.01)
+        paused_calls = builder.calls
+        served = await cell.get(wait_seconds=0)  # stale: answered at once
+        await asyncio.sleep(0.01)
+        return [paused_calls, served is first, builder.calls]
+
+    assert _run(go) == [1, True, 2]
+
+
 def test_start_runs_the_refresher_and_boot_hooks_and_stop_ends_them(monkeypatch: pytest.MonkeyPatch) -> None:
     builder = _Builder()
     cell = _cell(builder)
@@ -586,3 +678,35 @@ def test_keep_warm_rebuilds_an_expired_cell() -> None:
         return builder.calls
 
     assert _run(go) == 2
+
+
+def test_keep_warm_readiness_says_whether_the_database_schedules_are_paused(
+    monkeypatch: pytest.MonkeyPatch, idle_clock: _Clock
+) -> None:
+    builder = _Builder()
+    monkeypatch.setattr(
+        snapshots,
+        "_schedules",
+        [
+            KeepWarm(cell=_cell(builder), every_seconds=30.0, pauses_when_idle=True),
+            KeepWarm(
+                cell=SnapshotCell(
+                    "chain-only",
+                    builder,
+                    str.encode,
+                    lambda v: 0.0,
+                    fresh_seconds=1.0,
+                    build_timeout_seconds=1.0,
+                    retry_after_failure_seconds=1.0,
+                ),
+                every_seconds=60.0,
+            ),
+        ],
+    )
+    idle_clock.now += 120.0
+    active = snapshots.keep_warm_readiness()
+    assert (active.state, active.seconds_since_last_request) == ("active", 120.0)
+    assert active.idle_pause_seconds == 600.0
+    assert active.pausing_cells == ["test"]
+    idle_clock.now += 480.0
+    assert snapshots.keep_warm_readiness().state == "paused"

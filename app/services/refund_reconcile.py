@@ -41,6 +41,7 @@ import contextlib
 import logging
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -71,6 +72,22 @@ EXPIRY_MARGIN_SECONDS = 120
 # sweep is for what is left over after that, never a second opinion on a
 # payout still in progress.
 MIN_CLAIM_AGE_SECONDS = 300
+
+# When to look at a claim just taken: once it is MIN_CLAIM_AGE_SECONDS old,
+# plus this much for the clocks involved. An uphold that settles on its own
+# has moved the dispute on by then, and the pass finds nothing to do.
+CLAIM_WAKE_MARGIN_SECONDS = 15
+
+# A pass that met a claim it may still settle itself — too young, a transfer
+# that may yet land, a chain or store it could not ask — runs again after this
+# long, doubling with every such pass in a row (an RPC outage must not keep
+# the database awake for its whole length), and never later than the
+# REFUND_RECONCILE_INTERVAL_SECONDS fallback.
+RETRY_SECONDS = 120.0
+
+# The outcomes that are the sweep's to finish on a later pass. Everything else
+# is done, or a human's: a pass over only those waits for the next event.
+_RETRYABLE: frozenset[str] = frozenset({"young", "pending", "rpc_error", "error"})
 
 # The RPC's oldest retained ledger must close at least this long before the
 # claim was taken for NOT_FOUND to mean anything: the transaction cannot have
@@ -126,6 +143,9 @@ class SweepReport:
     outcomes: dict[str, int] = field(default_factory=dict)
     # Why the pass did nothing at all (refunds not configured, the store down).
     skipped: str | None = None
+    # The pass could not read what it needed (the store, the signer): worth
+    # another try soon, unlike a deployment that is not configured for it.
+    failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -475,7 +495,7 @@ async def _pass(started: float) -> SweepReport:
         claims = await get_dispute_store().list_refund_claims()
     except Exception as exc:
         logger.exception("refund reconcile: pass failed before any claim was read: %s", exc)
-        return SweepReport(started, time.time(), skipped=f"{type(exc).__name__}")
+        return SweepReport(started, time.time(), skipped=f"{type(exc).__name__}", failed=True)
     counts: Counter[str] = Counter()
     for claim in claims:
         try:
@@ -496,16 +516,99 @@ async def _pass(started: float) -> SweepReport:
     return report
 
 
+# ── when the next pass runs ───────────────────────────────────────────────
+# A pass reads the dispute store, and on a serverless Postgres every read is a
+# compute woken for five minutes, so the sweep does not poll: one pass at boot,
+# one when a claim taken has aged enough to be judged, a short retry while a
+# pass leaves something it can still finish, and otherwise only the
+# REFUND_RECONCILE_INTERVAL_SECONDS fallback, for a claim it was never told of.
+
+NextReason = Literal["boot", "claim", "retry", "fallback"]
+
+# The clock the schedule is kept on (epoch seconds); a test moves it.
+_now: Callable[[], float] = time.time
+
+# Set by `claim_taken`: the loop recomputes its wait. Made by the loop, on its
+# own event loop.
+_wake: asyncio.Event | None = None
+# When the earliest claim taken but not yet looked at becomes old enough.
+_due: float | None = None
+_next_at: float | None = None
+_next_reason: NextReason | None = None
+
+
+def claim_taken(now: float | None = None) -> None:
+    """A refund claim was just taken (dispute_svc): look at it once it is old
+    enough. Cheap and synchronous; safe whether or not the sweep runs."""
+    global _due
+    at = (_now() if now is None else now) + MIN_CLAIM_AGE_SECONDS + CLAIM_WAKE_MARGIN_SECONDS
+    _due = at if _due is None else min(_due, at)
+    if _wake is not None:
+        _wake.set()
+
+
+def _needs_retry(report: SweepReport | None) -> bool:
+    if report is None or report.failed:
+        return True  # the pass raised, or could not read the store
+    return any(action in _RETRYABLE for action in report.outcomes)
+
+
+def next_run(
+    report: SweepReport | None, due: float | None, *, finished_at: float, streak: int = 1
+) -> tuple[float, NextReason]:
+    """When the pass after `report` (None: it raised) runs, and why.
+
+    The earliest of: the fallback interval after it finished; a retry when it
+    left something it can still finish — RETRY_SECONDS, doubled for each of
+    the `streak` passes in a row that did so after the first; and `due`, the
+    moment a claim taken since becomes old enough to judge.
+    """
+    interval = settings.refund_reconcile_interval_seconds
+    runs: list[tuple[float, NextReason]] = [(finished_at + interval, "fallback")]
+    if _needs_retry(report):
+        backoff = RETRY_SECONDS * 2 ** min(max(streak, 1) - 1, 16)
+        runs.append((finished_at + min(backoff, interval), "retry"))
+    if due is not None:
+        runs.append((due, "claim"))
+    return min(runs, key=lambda run: run[0])
+
+
+async def _wait_for_wake(timeout: float) -> bool:
+    """Sleep up to `timeout` seconds; True when `claim_taken` woke it first."""
+    assert _wake is not None
+    try:
+        await asyncio.wait_for(_wake.wait(), timeout)
+    except TimeoutError:
+        return False
+    return True
+
+
 async def _loop() -> None:
+    global _wake, _due, _next_at, _next_reason
+    _wake = asyncio.Event()
+    _next_at, _next_reason = _now(), "boot"
+    streak = 0  # passes in a row that left something to retry
     while True:
+        if _due is not None and _due <= _now():
+            _due = None  # this pass is the one that claim was waiting for
         # `sweep_once` catches what a pass is expected to meet; this catches
         # the rest, because a loop that died on one bad pass would leave every
         # later claim to a human without saying so anywhere but one log line.
+        report: SweepReport | None
         try:
-            await sweep_once()
+            report = await sweep_once()
         except Exception:
             logger.exception("refund reconcile: a pass failed; the next one runs on schedule")
-        await asyncio.sleep(settings.refund_reconcile_interval_seconds)
+            report = None
+        finished = _now()
+        streak = streak + 1 if _needs_retry(report) else 0
+        while True:
+            _wake.clear()
+            _next_at, _next_reason = next_run(report, _due, finished_at=finished, streak=streak)
+            wait = _next_at - _now()
+            # Woken early: a claim was taken, so the next run may be sooner.
+            if wait <= 0 or not await _wait_for_wake(wait):
+                break
 
 
 def _on_task_done(task: asyncio.Task[None]) -> None:
@@ -537,30 +640,37 @@ def start() -> bool:
     _task = asyncio.create_task(_loop())
     _task.add_done_callback(_on_task_done)
     logger.info(
-        "refund reconcile: sweep started, every %.0fs, looking at claims older than %ds",
+        "refund reconcile: sweep started — a pass at boot, when a refund claim is %ds old, %.0fs after one that"
+        " can still finish a claim, and every %.0fs otherwise",
+        MIN_CLAIM_AGE_SECONDS + CLAIM_WAKE_MARGIN_SECONDS,
+        RETRY_SECONDS,
         settings.refund_reconcile_interval_seconds,
-        MIN_CLAIM_AGE_SECONDS,
     )
     return True
 
 
 async def stop() -> None:
     """Cancel the loop and wait for it to unwind (shutdown path)."""
-    global _task
+    global _task, _wake, _due, _next_at, _next_reason
     if _task is None:
         return
     _task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await _task
     _task = None
+    _wake, _due, _next_at, _next_reason = None, None, None, None
 
 
 def status() -> dict[str, Any]:
-    """The sweep as /readiness reports it: whether it runs, and its last pass."""
+    """The sweep as /readiness reports it: whether it runs, its last pass, and
+    when the next one is due and why (boot | claim | retry | fallback)."""
+    running = _task is not None and not _task.done()
     return {
         "enabled": settings.refund_reconcile_enabled and settings.dispute_refunds_enabled,
-        "running": _task is not None and not _task.done(),
+        "running": running,
         "last_run_at": None if _last is None else _last.finished_at,
         "last_skipped": None if _last is None else _last.skipped,
         "last_outcomes": {} if _last is None else dict(_last.outcomes),
+        "next_run_at": _next_at if running else None,
+        "next_run_reason": _next_reason if running else None,
     }

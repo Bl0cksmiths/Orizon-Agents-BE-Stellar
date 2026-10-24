@@ -36,9 +36,10 @@ from ..schemas import AGENT_ID_PATTERN
 from ..security import ErrorEnvelope
 from ..services import external_binding, operator_readiness
 from ..services.binding_registry import note_bound, note_unbound
-from ..services.binding_store import get_binding_store
+from ..services.binding_store import STORE_NAME, get_binding_store
 from ..services.endpoint_policy import EndpointPolicyError, resolve_and_check, validate_endpoint_url
 from ..services.external_binding import OwnerLookupError
+from ..services.store_errors import with_store_outage
 
 logger = logging.getLogger(__name__)
 
@@ -334,17 +335,20 @@ async def bind_challenge(
 @router.post(
     "/{agent_id}/bind",
     summary="Bind an endpoint to an agent id",
-    responses={
-        **_OWNER_RESPONSES,
-        401: {
-            "model": ErrorEnvelope,
-            "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+    responses=with_store_outage(
+        {
+            **_OWNER_RESPONSES,
+            401: {
+                "model": ErrorEnvelope,
+                "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+            },
+            422: {
+                "model": ErrorEnvelope,
+                "description": "`endpoint_not_allowed`, `signature_malformed`, or invalid input.",
+            },
         },
-        422: {
-            "model": ErrorEnvelope,
-            "description": "`endpoint_not_allowed`, `signature_malformed`, or invalid input.",
-        },
-    },
+        STORE_NAME,
+    ),
 )
 async def bind(
     body: BindReq,
@@ -432,14 +436,17 @@ async def bind(
 @router.delete(
     "/{agent_id}/bind",
     summary="Revoke an agent's endpoint binding",
-    responses={
-        **_OWNER_RESPONSES,
-        401: {
-            "model": ErrorEnvelope,
-            "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+    responses=with_store_outage(
+        {
+            **_OWNER_RESPONSES,
+            401: {
+                "model": ErrorEnvelope,
+                "description": "`not_agent_owner` — no live challenge, or the signature is not the owner's over it.",
+            },
+            422: {"model": ErrorEnvelope, "description": "`signature_malformed`, or invalid input."},
         },
-        422: {"model": ErrorEnvelope, "description": "`signature_malformed`, or invalid input."},
-    },
+        STORE_NAME,
+    ),
 )
 async def unbind(
     body: UnbindReq,
@@ -527,7 +534,10 @@ async def unbind(
 @router.get(
     "/{agent_id}/binding",
     summary="Read an agent's binding",
-    responses={404: {"model": ErrorEnvelope, "description": "`binding_not_found` — this agent has no live binding."}},
+    responses=with_store_outage(
+        {404: {"model": ErrorEnvelope, "description": "`binding_not_found` — this agent has no live binding."}},
+        STORE_NAME,
+    ),
 )
 async def read_binding(
     agent_id: str = Path(..., pattern=AGENT_ID_PATTERN),

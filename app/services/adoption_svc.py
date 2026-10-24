@@ -152,7 +152,7 @@ TARGET_SETTLED_EXTERNAL_WORKFLOWS = 3
 # used to be a settlement scan per external agent — ~15 RPC calls each — and
 # at 1,000 agents the build overran its budget and the endpoint went 503.
 #
-# Rebuilt this often while the process is up. Settlements only show up here
+# Rebuilt this often while the API is in use. Settlements only show up here
 # through a scan, so this is how long a new one can take to appear.
 REPORT_REFRESH_SECONDS = 300.0
 # ...and when the on-chain mirror's agents or owners change, but not more often
@@ -949,19 +949,39 @@ report_cell: SnapshotCell[AdoptionReport] = SnapshotCell(
     retry_after_failure_seconds=REPORT_RETRY_AFTER_FAILURE_SECONDS,
     may_build=_may_build,
 )
+# Paused while the API is idle (KEEP_WARM_IDLE_PAUSE_SECONDS): a build reads
+# the binding store and its result is persisted, so a schedule that ran with
+# nobody asking kept the database awake. A request finding the report older
+# than REPORT_REFRESH_SECONDS still starts the rebuild behind the one it serves.
 snapshots.keep_warm(
     KeepWarm(
         cell=report_cell,
         every_seconds=REPORT_REFRESH_SECONDS,
         fingerprint=registry_fingerprint,
         min_change_rebuild_seconds=REPORT_REGISTRY_REBUILD_SECONDS,
+        pauses_when_idle=True,
     )
 )
-# Every build is saved, and the next process serves it until its own lands.
+
+
+def report_content_key(report: AdoptionReport) -> str:
+    """What makes two reports different enough to write the second.
+
+    Leaves out what moves on every build without changing what a reviewer is
+    shown: `generated_at` (the build's own stamp), and the scan's measured
+    reach — `window_days` and `coverage` advance with every ledger closed.
+    """
+    return report.model_dump_json(exclude={"generated_at", "window_days", "coverage"})
+
+
+# A build whose counts, operators or verdicts changed is saved (spaced by
+# SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS), and the next process serves the last
+# one saved until its own build lands.
 snapshot_store.persist(
     report_cell,
     AdoptionReport.model_validate_json,
     max_restore_age_seconds=REPORT_RESTORE_MAX_AGE_SECONDS,
+    content_key=report_content_key,
 )
 
 
