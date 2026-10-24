@@ -63,6 +63,14 @@ _MAX_BINDINGS = 500
 _POOL_MIN_SIZE = 0
 _POOL_MAX_SIZE = 5
 
+# Bounds on the connect and on every statement, for dispute_store's reasons:
+# asyncpg's own are 60 seconds to connect and no limit at all on a command, so
+# an unreachable database used to hold a bind or a binding read for a minute
+# before it failed. Bounded, the failure is prompt and is answered 503
+# store_unavailable rather than by a request that looks hung.
+_POOL_CONNECT_TIMEOUT = 10.0
+_POOL_COMMAND_TIMEOUT = 10.0
+
 # How this store is named when its database cannot be reached — dispute_store's
 # STORE_NAME, for its reasons.
 STORE_NAME = "agent binding"
@@ -509,7 +517,13 @@ class PostgresBindingStore:
 
     async def _create_pool(self) -> Any:
         asyncpg = _import_asyncpg()
-        return await asyncpg.create_pool(dsn=self._dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+        return await asyncpg.create_pool(
+            dsn=self._dsn,
+            min_size=_POOL_MIN_SIZE,
+            max_size=_POOL_MAX_SIZE,
+            timeout=_POOL_CONNECT_TIMEOUT,
+            command_timeout=_POOL_COMMAND_TIMEOUT,
+        )
 
     @outage_boundary(STORE_NAME)
     async def get(self, agent_id: str) -> BindingRecord | None:
