@@ -59,8 +59,9 @@ from ..security import (
     require_adjudicator,
 )
 from ..services import dispute_read, dispute_svc, platform_treasury, refund_svc, task_persistence
-from ..services.dispute_store import DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
+from ..services.dispute_store import STORE_NAME, DisputeRecord, DisputeStatus, SettlementRecord, SettlementStep
 from ..services.external_binding import dispute_read_message
+from ..services.store_errors import with_store_outage
 from ..state import state
 from ..task_auth import TaskReadProof, task_read_proof
 
@@ -751,29 +752,32 @@ def _refuse_buyer(exc: dispute_svc.DisputeError) -> HTTPException:
     return CodedHTTPException(exc.status_code, exc.code, exc.message)
 
 
+_CHALLENGE_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {"model": ErrorEnvelope, "description": "`unknown_job` — no settled workflow with that job id."},
+    409: {
+        "model": ErrorEnvelope,
+        "description": (
+            "The step cannot be disputed: `dispute_window_closed`, `step_not_settled` or `nothing_was_charged`."
+        ),
+    },
+    429: {
+        "model": ErrorEnvelope,
+        "description": (
+            "Rate limited (+ Retry-After): the global limit, or `dispute_challenge_rate_limited` — this "
+            "client's challenge budget is spent."
+        ),
+    },
+    503: {
+        "model": ErrorEnvelope,
+        "description": "`challenge_capacity_dispute` — every dispute-challenge slot is live. Ask again shortly.",
+    },
+}
+
+
 @router.post(
     "/disputes/challenge",
     summary="Mint a dispute challenge to sign",
-    responses={
-        404: {"model": ErrorEnvelope, "description": "`unknown_job` — no settled workflow with that job id."},
-        409: {
-            "model": ErrorEnvelope,
-            "description": (
-                "The step cannot be disputed: `dispute_window_closed`, `step_not_settled` or `nothing_was_charged`."
-            ),
-        },
-        429: {
-            "model": ErrorEnvelope,
-            "description": (
-                "Rate limited (+ Retry-After): the global limit, or `dispute_challenge_rate_limited` — this "
-                "client's challenge budget is spent."
-            ),
-        },
-        503: {
-            "model": ErrorEnvelope,
-            "description": "`challenge_capacity_dispute` — every dispute-challenge slot is live. Ask again shortly.",
-        },
-    },
+    responses=with_store_outage(_CHALLENGE_RESPONSES, STORE_NAME),
 )
 async def dispute_challenge(body: DisputeChallengeReq, request: Request) -> DisputeChallengeResponse:
     """Issue the nonce and the exact string the payer's wallet must sign.
@@ -852,7 +856,7 @@ _READ_GRANT_RESPONSES: dict[int | str, dict[str, object]] = {
 @router.post(
     "/disputes/read-challenge",
     summary="Mint a challenge the payer signs to read their disputes' free text",
-    responses=_READ_CHALLENGE_RESPONSES,
+    responses=with_store_outage(_READ_CHALLENGE_RESPONSES, STORE_NAME),
 )
 async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadChallengeResponse:
     """The first half of D-067's fix: a nonce for the payer to sign.
@@ -880,7 +884,7 @@ async def dispute_read_challenge(body: DisputeReadChallengeReq) -> DisputeReadCh
 @router.post(
     "/disputes/read-grant",
     summary="Exchange the payer's read signature for a read grant",
-    responses=_READ_GRANT_RESPONSES,
+    responses=with_store_outage(_READ_GRANT_RESPONSES, STORE_NAME),
 )
 async def dispute_read_grant(body: DisputeReadGrantReq) -> DisputeReadGrantResponse:
     """The second half: verify the payer's signature and hand back a grant.
@@ -933,12 +937,15 @@ def _duplicate_envelope(exc: dispute_svc.DisputeError, existing: DisputeRecord) 
     "/disputes",
     response_model=DisputeResponse,
     summary="Open a dispute on a settled step",
-    responses={
-        409: {
-            "model": DuplicateDisputeResponse,
-            "description": "This step is already disputed — the body carries the original dispute unchanged.",
-        }
-    },
+    responses=with_store_outage(
+        {
+            409: {
+                "model": DuplicateDisputeResponse,
+                "description": "This step is already disputed — the body carries the original dispute unchanged.",
+            }
+        },
+        STORE_NAME,
+    ),
 )
 async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
     """Verify the payer's signature and record the dispute.
@@ -988,10 +995,15 @@ async def open_dispute(body: OpenDisputeReq) -> DisputeResponse | JSONResponse:
     return DisputeResponse.of(record, free_text=True)
 
 
+_UNKNOWN_DISPUTE: dict[int | str, dict[str, object]] = {
+    404: {"model": ErrorEnvelope, "description": "`unknown_dispute` — no dispute with that id."}
+}
+
+
 @router.get(
     "/disputes/{dispute_id}",
     summary="Read one dispute",
-    responses={404: {"model": ErrorEnvelope, "description": "`unknown_dispute` — no dispute with that id."}},
+    responses=with_store_outage(_UNKNOWN_DISPUTE, STORE_NAME),
 )
 async def get_dispute(
     dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
@@ -1069,6 +1081,7 @@ async def _require_listing_read(
 @router.get(
     "/tasks/{task_id}/disputes",
     summary="A task's dispute window and the disputes raised on it",
+    responses=with_store_outage({}, STORE_NAME),
     dependencies=[Depends(_require_listing_read)],
 )
 async def list_task_disputes(
@@ -1233,7 +1246,7 @@ _UPHOLD_RESPONSES: dict[int | str, dict[str, object]] = {
     "/disputes/{dispute_id}/uphold",
     summary="Uphold a dispute and credit the buyer",
     dependencies=[Depends(require_adjudicator)],
-    responses=_UPHOLD_RESPONSES,
+    responses=with_store_outage(_UPHOLD_RESPONSES, STORE_NAME),
 )
 async def uphold_dispute(
     dispute_id: Annotated[str, Path(min_length=1, max_length=64)],
@@ -1297,7 +1310,7 @@ async def uphold_dispute(
     # No 502/504: nothing here signs, so there is no ledger for it to report
     # on. Its own 422 — `rejection_reason_required`, a note that cleaned to
     # nothing — shares the row `include_router` already merges in.
-    responses=_ADJUDICATION_RESPONSES,
+    responses=with_store_outage(_ADJUDICATION_RESPONSES, STORE_NAME),
 )
 async def reject_dispute(
     body: RejectDisputeReq,
