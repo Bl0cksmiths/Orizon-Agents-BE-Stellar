@@ -134,3 +134,26 @@ def test_the_app_counts_an_api_request_and_not_a_probe(monkeypatch: pytest.Monke
 
     client.get("/api/agents")
     assert tracker.seconds_since_last_request() == 0.0
+
+
+def test_readiness_shows_the_keep_warm_pause_and_does_not_end_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setattr(settings, "keep_warm_idle_pause_seconds", 600.0)
+    clock = Clock()
+    monkeypatch.setattr(activity, "tracker", ActivityTracker(clock))
+    client = TestClient(app)
+
+    clock.now += 601.0
+    paused = client.get("/readiness").json()["keep_warm"]
+    assert paused["state"] == "paused"
+    assert paused["seconds_since_last_request"] == 601.0
+    assert paused["idle_pause_seconds"] == 600.0
+    assert set(paused["pausing_cells"]) == {"overview", "adoption"}
+    # The probe itself is no reason to resume.
+    assert client.get("/readiness").json()["keep_warm"]["state"] == "paused"
+
+    client.get("/api/agents")
+    assert client.get("/readiness").json()["keep_warm"]["state"] == "active"

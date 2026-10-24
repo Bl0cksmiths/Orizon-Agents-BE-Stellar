@@ -501,7 +501,7 @@ def keep_warm_readiness() -> KeepWarmReadiness:
         state="paused" if activity.idle() else "active",
         seconds_since_last_request=round(activity.tracker.seconds_since_last_request(), 1),
         idle_pause_seconds=settings.keep_warm_idle_pause_seconds,
-        pausing_cells=[s.cell.name for s in _schedules if s.pauses_when_idle],
+        pausing_cells=sorted(s.cell.name for s in _schedules if s.pauses_when_idle),
     )
 
 

@@ -126,6 +126,14 @@ def test_readiness_ready_without_signing_key(client, monkeypatch):
         # The mode in force; the counts are whatever earlier requests in this
         # process left, so only their presence is pinned (tests/test_origin_lock.py).
         "origin_lock": {"mode": settings.origin_lock_mode, "would_block_total": ANY, "would_block_last_hour": ANY},
+        # Whether the database-reading rebuilds are paused: that depends on when
+        # this process last served an API request, so only the shape is pinned.
+        "keep_warm": {
+            "state": ANY,
+            "seconds_since_last_request": ANY,
+            "idle_pause_seconds": 600.0,
+            "pausing_cells": ["adoption", "overview"],
+        },
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }
@@ -163,6 +171,14 @@ def test_readiness_reports_a_floor_that_locks_newcomers_out_and_stays_ready(clie
         # The mode in force; the counts are whatever earlier requests in this
         # process left, so only their presence is pinned (tests/test_origin_lock.py).
         "origin_lock": {"mode": settings.origin_lock_mode, "would_block_total": ANY, "would_block_last_hour": ANY},
+        # Whether the database-reading rebuilds are paused: that depends on when
+        # this process last served an API request, so only the shape is pinned.
+        "keep_warm": {
+            "state": ANY,
+            "seconds_since_last_request": ANY,
+            "idle_pause_seconds": 600.0,
+            "pausing_cells": ["adoption", "overview"],
+        },
         # No Claude or jev key in the hermetic suite (app/llm/testing.py).
         "orchestrator": offline_readiness(),
     }

@@ -954,6 +954,7 @@ class ReadinessResponse(BaseModel):
     registry: RegistryReadiness  # informational, never gates readiness
     treasury: TreasuryReadiness  # informational, never gates readiness
     origin_lock: OriginLockReadiness  # informational, never gates readiness
+    keep_warm: snapshots.KeepWarmReadiness  # informational, never gates readiness
     # Informational. Anyone: provider and planning active|paused (+ when a
     # pause lifts). With the operator X-API-Key: keys present, models, and
     # today's spend against the cap — numbers an abuser must not see.
@@ -1037,6 +1038,8 @@ async def readiness(
         treasury=_treasury_readiness(),
         # From memory: the mode and this process's refusal counts (ADR 0017).
         origin_lock=origin_lock_readiness(),
+        # From memory: whether the database-reading rebuilds are paused (idle).
+        keep_warm=snapshots.keep_warm_readiness(),
         # A wrong or absent key is simply the public view: a probe never 401s.
         orchestrator=llm_provider.readiness(operator=header_secret_matches(x_api_key, settings.api_key)),
     )
