@@ -46,6 +46,9 @@ from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, TypeVar
 
+from pydantic import BaseModel
+
+from ..config import settings
 from . import activity
 
 logger = logging.getLogger(__name__)
@@ -474,6 +477,32 @@ def on_boot(hook: Callable[[], Awaitable[None]]) -> None:
 
 def cells() -> list[SnapshotCell[Any]]:
     return [s.cell for s in _schedules]
+
+
+class KeepWarmReadiness(BaseModel):
+    """Whether the database-reading keep-warm schedules are running (/readiness).
+
+    `state` is `paused` once no meaningful API request has arrived for
+    `idle_pause_seconds` (KEEP_WARM_IDLE_PAUSE_SECONDS) — probes, this one
+    included, do not count — and `active` otherwise. `pausing_cells` names
+    the schedules that stand down while paused; the rest keep running.
+    Informational: a paused process serves every request, and the request
+    resumes the schedules.
+    """
+
+    state: Literal["active", "paused"]
+    seconds_since_last_request: float
+    idle_pause_seconds: float
+    pausing_cells: list[str]
+
+
+def keep_warm_readiness() -> KeepWarmReadiness:
+    return KeepWarmReadiness(
+        state="paused" if activity.idle() else "active",
+        seconds_since_last_request=round(activity.tracker.seconds_since_last_request(), 1),
+        idle_pause_seconds=settings.keep_warm_idle_pause_seconds,
+        pausing_cells=[s.cell.name for s in _schedules if s.pauses_when_idle],
+    )
 
 
 async def _refresher() -> None:

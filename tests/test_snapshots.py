@@ -678,3 +678,35 @@ def test_keep_warm_rebuilds_an_expired_cell() -> None:
         return builder.calls
 
     assert _run(go) == 2
+
+
+def test_keep_warm_readiness_says_whether_the_database_schedules_are_paused(
+    monkeypatch: pytest.MonkeyPatch, idle_clock: _Clock
+) -> None:
+    builder = _Builder()
+    monkeypatch.setattr(
+        snapshots,
+        "_schedules",
+        [
+            KeepWarm(cell=_cell(builder), every_seconds=30.0, pauses_when_idle=True),
+            KeepWarm(
+                cell=SnapshotCell(
+                    "chain-only",
+                    builder,
+                    str.encode,
+                    lambda v: 0.0,
+                    fresh_seconds=1.0,
+                    build_timeout_seconds=1.0,
+                    retry_after_failure_seconds=1.0,
+                ),
+                every_seconds=60.0,
+            ),
+        ],
+    )
+    idle_clock.now += 120.0
+    active = snapshots.keep_warm_readiness()
+    assert (active.state, active.seconds_since_last_request) == ("active", 120.0)
+    assert active.idle_pause_seconds == 600.0
+    assert active.pausing_cells == ["test"]
+    idle_clock.now += 480.0
+    assert snapshots.keep_warm_readiness().state == "paused"
