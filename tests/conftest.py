@@ -145,12 +145,14 @@ def isolated_snapshots(monkeypatch):
     TestClient's lifespan would start builds them in the background, behind
     whatever the test is counting. A test of the refresher enables it itself.
     """
-    from app.services import snapshots
+    from app.services import snapshot_store, snapshots
 
     monkeypatch.setattr(snapshots, "KEEP_WARM_ENABLED", False)
     snapshots.reset_all()
+    snapshot_store.forget_persisted()
     yield
     snapshots.reset_all()
+    snapshot_store.forget_persisted()
 
 
 @pytest.fixture

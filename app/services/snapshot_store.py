@@ -7,7 +7,9 @@ the first request of a new process. A snapshot that takes minutes to build (the
 adoption report, D-091) would then answer "computing" to nearly every visit. So
 each live build of an opted-in cell is written to Postgres, and the next
 process serves the last one — marked `X-Snapshot-Source: persisted`, dated by
-`generated_at` and its age — until its own first build replaces it.
+`generated_at` and its age — until its own first build replaces it. Only a
+build whose content changed is written: a row nobody reads until the next
+boot is not worth a database wake-up per build.
 
 A cache, not a record: one row per (name, scope), overwritten in place, and a
 row that cannot be read back (a schema the model no longer accepts, a scope
@@ -30,7 +32,8 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
+from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol, TypeVar
 
 from ..config import settings
@@ -166,6 +169,22 @@ def get_snapshot_store() -> SnapshotStore:
 _saves: set[asyncio.Task[None]] = set()
 
 
+@dataclass
+class _Ledger:
+    """What was last written for one (name, scope): the content's key, so a
+    build that changed nothing a restore would serve is not written again."""
+
+    key: Hashable | None = None
+
+
+_ledgers: dict[tuple[str, str], _Ledger] = {}
+
+
+def forget_persisted() -> None:
+    """Forget what every persisted cell last wrote (shutdown, tests)."""
+    _ledgers.clear()
+
+
 async def close_snapshot_store() -> None:
     """Finish (briefly) the writes in flight and release the pool (shutdown)."""
     global _store
@@ -174,6 +193,7 @@ async def close_snapshot_store() -> None:
         _done, late = await asyncio.wait(pending, timeout=5)
         for task in late:
             task.cancel()
+    forget_persisted()
     store, _store = _store, None
     if store is not None:
         try:
@@ -193,8 +213,19 @@ def deployment_scope() -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
-def persist(cell: SnapshotCell[T], decode: Callable[[bytes], T], *, max_restore_age_seconds: float | None) -> None:
-    """Save every live build of `cell`, and restore the last one at boot.
+def persist(
+    cell: SnapshotCell[T],
+    decode: Callable[[bytes], T],
+    *,
+    max_restore_age_seconds: float | None,
+    content_key: Callable[[T], Hashable] | None = None,
+) -> None:
+    """Save the live builds of `cell` that changed, and restore the last one at boot.
+
+    A build is written only when its content differs from the last one this
+    process wrote or restored: `content_key` of its value, or — without one —
+    the body's ETag. A value that stamps itself (`generated_at`) passes a key
+    without the stamp, or every build would count as a change.
 
     A restored snapshot is served only until the cell's first build of this
     process lands, and never when it is older than `max_restore_age_seconds`:
@@ -203,27 +234,46 @@ def persist(cell: SnapshotCell[T], decode: Callable[[bytes], T], *, max_restore_
     and that is better shown dated than not at all.
     """
 
+    def key_of(snap: Snapshot[T]) -> Hashable:
+        return content_key(snap.value) if content_key is not None else snap.etag
+
     def save(snap: Snapshot[T]) -> None:
-        task = asyncio.get_running_loop().create_task(_save(cell.name, snap))
+        ledger = _ledgers.setdefault((cell.name, deployment_scope()), _Ledger())
+        key = key_of(snap)
+        if key == ledger.key:
+            return
+        ledger.key = key
+        task = asyncio.get_running_loop().create_task(_save(cell.name, snap, ledger, key))
         _saves.add(task)
         task.add_done_callback(_saves.discard)
 
+    def restored(snap: Snapshot[T]) -> None:
+        _ledgers.setdefault((cell.name, deployment_scope()), _Ledger()).key = key_of(snap)
+
     async def restore() -> None:
-        await _restore(cell, decode, max_restore_age_seconds)
+        await _restore(cell, decode, max_restore_age_seconds, restored)
 
     restore.__name__ = f"restore_{cell.name}_snapshot"
     cell.on_stored(save)
     snapshots.on_boot(restore)
 
 
-async def _save(name: str, snap: Snapshot[Any]) -> None:
+async def _save(name: str, snap: Snapshot[Any], ledger: _Ledger, key: Hashable) -> None:
     try:
         await get_snapshot_store().save(name, deployment_scope(), snap.generated_at, snap.body)
     except Exception as e:
+        # Not written, so not what the row holds: the next build tries again.
+        if ledger.key == key:
+            ledger.key = None
         logger.warning("snapshot %s not persisted: %s: %s", name, type(e).__name__, e)
 
 
-async def _restore(cell: SnapshotCell[T], decode: Callable[[bytes], T], max_age: float | None) -> None:
+async def _restore(
+    cell: SnapshotCell[T],
+    decode: Callable[[bytes], T],
+    max_age: float | None,
+    restored: Callable[[Snapshot[T]], None],
+) -> None:
     try:
         stored = await get_snapshot_store().load(cell.name, deployment_scope())
     except Exception as e:
@@ -241,4 +291,7 @@ async def _restore(cell: SnapshotCell[T], decode: Callable[[bytes], T], max_age:
         logger.warning("snapshot %s not restored: the stored body no longer decodes: %s", cell.name, e)
         return
     if cell.restore(value, stored.generated_at):
+        snap = cell.current()
+        if snap is not None:
+            restored(snap)
         logger.info("snapshot %s restored from storage, %.0f s old", cell.name, age)

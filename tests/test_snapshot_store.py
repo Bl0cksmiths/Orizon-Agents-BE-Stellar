@@ -72,6 +72,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemorySnapshotStore:
 async def _drain_saves() -> None:
     while snapshot_store._saves:
         await asyncio.gather(*list(snapshot_store._saves))
+        # A gather over tasks already done returns without yielding, and their
+        # done callbacks — which drop them from the set — are still queued.
+        await asyncio.sleep(0)
 
 
 async def _boot() -> None:
@@ -188,6 +191,107 @@ def test_without_an_age_limit_a_row_of_any_age_is_restored(store: InMemorySnapsh
     assert snap.value.n == 7
     assert snap.source == "persisted"
     assert snap.age_seconds() >= 30 * 86_400 - 1
+
+
+class _CountingStore(InMemorySnapshotStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[bytes] = []
+        self.fail = False
+
+    async def save(self, name: str, scope: str, generated_at: float, body: bytes) -> None:
+        if self.fail:
+            raise ConnectionError("neon asleep")
+        self.writes.append(body)
+        await super().save(name, scope, generated_at, body)
+
+
+class _Same:
+    """Builds whose content is `n` until the test moves it."""
+
+    def __init__(self) -> None:
+        self.n = 1
+
+    async def __call__(self) -> _Doc:
+        return _Doc(n=self.n, generated_at=time.time())
+
+
+def _keyed_cell(builds: _Same, counting: _CountingStore, monkeypatch: pytest.MonkeyPatch) -> SnapshotCell[_Doc]:
+    monkeypatch.setattr(snapshot_store, "_store", counting)
+    monkeypatch.setattr(snapshots, "_boot_hooks", [])
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", 0.0)
+    cell = _cell(builds)  # type: ignore[arg-type]
+    snapshot_store.persist(cell, _decode, max_restore_age_seconds=None, content_key=lambda d: d.n)
+    return cell
+
+
+async def _build(cell: SnapshotCell[_Doc]) -> None:
+    task = cell.refresh(force=True)
+    assert task is not None
+    await task
+    await _drain_saves()
+
+
+def test_a_build_whose_content_did_not_change_is_not_written_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+
+    async def go() -> None:
+        await _build(cell)
+        await _build(cell)  # same content, a newer generated_at: not written
+        builds.n = 2
+        await _build(cell)
+        await _build(cell)
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [1, 2]
+
+
+def test_without_a_content_key_the_body_decides(store: InMemorySnapshotStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "snapshot_persist_min_interval_seconds", 0.0)
+    counting = _CountingStore()
+    monkeypatch.setattr(snapshot_store, "_store", counting)
+    cell = _cell(_Builds())
+    snapshot_store.persist(cell, _decode, max_restore_age_seconds=None)
+
+    async def go() -> None:
+        await _build(cell)
+        await _build(cell)
+
+    asyncio.run(go())
+    assert len(counting.writes) == 2  # each build's body differs
+
+
+def test_a_write_that_failed_is_tried_again_by_the_next_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    counting.fail = True
+
+    async def go() -> None:
+        await _build(cell)
+        counting.fail = False
+        await _build(cell)  # unchanged, but the row never got it
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [1]
+
+
+def test_a_first_build_that_matches_the_restored_row_is_not_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds, counting = _Same(), _CountingStore()
+    cell = _keyed_cell(builds, counting, monkeypatch)
+    at = time.time() - 600
+    # Straight into the row, past the write counter: the previous process wrote it.
+    row = InMemorySnapshotStore.save(counting, "doc", snapshot_store.deployment_scope(), at, _encode(_Doc(1, at)))
+    asyncio.run(row)
+
+    async def go() -> None:
+        await _boot()
+        await _build(cell)
+        builds.n = 2
+        await _build(cell)
+
+    asyncio.run(go())
+    assert [json.loads(b)["n"] for b in counting.writes] == [2]
 
 
 class _BrokenStore:
