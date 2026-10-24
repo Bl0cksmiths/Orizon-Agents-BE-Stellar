@@ -997,10 +997,17 @@ the procedure below for every claim that has a hash to look up. Both are off
 by default; with the refund switch off the sweep does not start, and says so
 at boot. The public testnet deployment has run with both on since 2026-09-30:
 its `/readiness` reports `disputes.reconcile.enabled: true`, the sweep
-running, and `disputes.store: "postgres"`. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 3600, from
-30 to 86400 — anything else refuses to boot), one pass at a time, and it
-**signs and submits nothing**: it reads the chain with `getTransaction` and
-writes the dispute record, and that is all.
+running, and `disputes.store: "postgres"`. It does not poll: a pass runs at
+boot, when a refund claim taken by an uphold is old enough to judge (five
+minutes and a few seconds after it was taken), two minutes after a pass that
+left a claim it can still finish (too young, still pending, the RPC or the
+store unreadable), and otherwise every `REFUND_RECONCILE_INTERVAL_SECONDS`
+(default 3600, from 30 to 86400 — anything else refuses to boot) as a
+fallback, so an idle deployment lets a serverless Postgres suspend.
+`/readiness` names the next pass in `disputes.reconcile.next_run_at` and
+`next_run_reason` (`boot`, `claim`, `retry` or `fallback`). One pass runs at a
+time, and it **signs and submits nothing**: it reads the chain with
+`getTransaction` and writes the dispute record, and that is all.
 
 It only looks at claims older than five minutes, so it never second-guesses a
 payout that is still running. For each one it asks the RPC about the dispute's
