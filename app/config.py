@@ -422,13 +422,18 @@ class Settings(BaseSettings):
     # about the platform's wallet that belongs to a deployment paying credits.
     # It never signs or submits anything.
     refund_reconcile_enabled: bool = False
-    # Seconds between two passes. Bounded both ways (`_refund_reconcile_interval_is_usable`):
-    # at least 30, because a pass reads the chain once per held claim; at most
-    # 3600, because the RPC keeps only a window of transaction history (about
+    # The FALLBACK between two passes. The sweep is woken by the event itself —
+    # a claim taken, looked at once it is old enough — and re-checks a claim
+    # it could not settle yet on its own short retry, so this only bounds how
+    # long a claim it was never told about can wait, and it reads the database
+    # each time: an hour, so an idle deployment lets a serverless Postgres
+    # suspend. Bounded both ways (`_refund_reconcile_interval_is_usable`): at
+    # least 30, because a pass reads the chain once per held claim; at most a
+    # day, because the RPC keeps only a window of transaction history (about
     # seven days on SDF's testnet RPC, as little as a day on a default one) and
-    # a claim must be looked at well inside it — past it, NOT_FOUND no longer
-    # means anything and the claim falls back to a human.
-    refund_reconcile_interval_seconds: float = 120.0
+    # a claim must be looked at inside it — past it, NOT_FOUND no longer means
+    # anything and the claim falls back to a human.
+    refund_reconcile_interval_seconds: float = 3600.0
 
     # ── Stellar (testnet defaults) ────────────────────────────
     stellar_network: str = "testnet"
@@ -582,18 +587,18 @@ class Settings(BaseSettings):
         """Refuse a sweep interval that could not keep up with the RPC's history.
 
         A NaN or inf would make the loop's sleep raise or never end; under 30
-        seconds a pass is a chain read per claim on repeat; over an hour starts
-        eating into the RPC's history window, which is what makes NOT_FOUND
+        seconds a pass is a chain read per claim on repeat; over a day is past
+        the shortest RPC history window, which is what makes NOT_FOUND
         answerable at all. Checked whether or not the sweep is on, so turning
         it on later is not the moment a typo is found. Names the variable,
         never the value.
         """
         interval = self.refund_reconcile_interval_seconds
-        if not (math.isfinite(interval) and 30 <= interval <= 3600):
+        if not (math.isfinite(interval) and 30 <= interval <= 86_400):
             raise ValueError(
-                "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 3600 — the sweep "
-                "reads the chain once per held refund claim each pass, and has to look at every claim well inside "
-                "the RPC's transaction history window"
+                "REFUND_RECONCILE_INTERVAL_SECONDS must be a finite number of seconds from 30 to 86400 — the "
+                "sweep's fallback between passes; it reads the chain once per held refund claim each pass, and has "
+                "to look at every claim inside the RPC's transaction history window"
             )
         return self
 

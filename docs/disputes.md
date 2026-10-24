@@ -997,8 +997,8 @@ the procedure below for every claim that has a hash to look up. Both are off
 by default; with the refund switch off the sweep does not start, and says so
 at boot. The public testnet deployment has run with both on since 2026-09-30:
 its `/readiness` reports `disputes.reconcile.enabled: true`, the sweep
-running, and `disputes.store: "postgres"`. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 120, from
-30 to 3600 — anything else refuses to boot), one pass at a time, and it
+running, and `disputes.store: "postgres"`. It runs every `REFUND_RECONCILE_INTERVAL_SECONDS` (default 3600, from
+30 to 86400 — anything else refuses to boot), one pass at a time, and it
 **signs and submits nothing**: it reads the chain with `getTransaction` and
 writes the dispute record, and that is all.
 
