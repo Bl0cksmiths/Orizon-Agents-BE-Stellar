@@ -38,7 +38,7 @@ from test_refund_execution import _dispute as _upheld_dispute
 
 import app.stellar.client as sc
 from app.config import settings
-from app.services import dispute_store, dispute_svc, refund_svc
+from app.services import dispute_store, dispute_svc, refund_reconcile, refund_svc
 from app.services.dispute_store import DisputeRecord, SettlementRecord, SettlementStep
 from app.services.dispute_svc import DisputeError, dispute_message
 from app.services.execution_svc import _settled_usdc
@@ -162,6 +162,21 @@ def test_a_transfer_lost_after_the_send_records_its_signed_hash(monkeypatch) -> 
     # Still held, never released — and now the record names the transaction.
     assert (current.status, current.refund_tx, queue) == ("crediting", signed, [dispute.id])
     assert len(calls) == 1
+
+
+def test_a_claim_taken_tells_the_reconcile_sweep_when_to_look(monkeypatch) -> None:
+    """The sweep no longer polls: the claim is what schedules its look, so a
+    transfer lost after the send is judged minutes later, not at the fallback."""
+    signed = "5e" * 32
+    _chain(monkeypatch, sc.InFlightError("send failed: connection reset", signed))
+    taken: list[str] = []
+    monkeypatch.setattr(refund_reconcile, "claim_taken", lambda: taken.append("claim"))
+    dispute = a_dispute()
+
+    with pytest.raises(DisputeError):
+        asyncio.run(dispute_svc.uphold(dispute.id))
+
+    assert taken == ["claim"]
 
 
 def test_a_raise_that_is_not_in_flight_still_has_no_hash(monkeypatch) -> None:

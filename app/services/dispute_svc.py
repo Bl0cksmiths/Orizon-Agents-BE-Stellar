@@ -56,7 +56,7 @@ from ..config import settings
 from ..schemas import TraceLevel, TraceLine
 from ..state import state
 from ..trace_bus import bus
-from . import dispute_rating, rating_writer, refund_svc, reputation_svc
+from . import dispute_rating, rating_writer, refund_reconcile, refund_svc, reputation_svc
 from . import external_binding as eb
 from .dispute_store import (
     DisputeRecord,
@@ -1811,6 +1811,9 @@ async def uphold(dispute_id: str, *, on_rating: RatingObserver | None = None) ->
         current = await store.get_dispute(dispute_id) or dispute
         logger.info("dispute %s is already claimed (%s) — nothing signed here", current.id, current.status)
         return current
+    # The dispute is `crediting` now. If this uphold cannot settle it, the
+    # reconcile sweep looks at it once the claim is old enough to judge.
+    refund_reconcile.claim_taken()
 
     settlement, amount_usdc = await _price_claim(store, claimed)
 
